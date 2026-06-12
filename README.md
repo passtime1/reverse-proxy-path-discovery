@@ -327,7 +327,7 @@ MIT License
 
 ## 👨‍💻 作者
 
-Claude Code Assistant
+fly
 
 ---
 
