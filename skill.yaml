@@ -1,0 +1,192 @@
+name: reverse-proxy-path-discovery
+description: |
+  识别反向代理服务器（Nginx/Apache/Cloudflare等），发现其通过二级路径映射到不同后端系统的隐藏资产。
+
+  场景：反向代理配置为 /abc/ -> 系统A, /bbb/ -> 系统B
+  目标：通过 site:xxx.com 搜索发现这些 /abc/、/bbb/ 等二级路径入口
+
+  内置工具：proxy_detector.py - 本地 Python 脚本检测反向代理特征
+
+triggers:
+  - pattern: "(?:反向代理|reverse.?proxy|nginx|apache).{0,30}(?:路径|path|映射|资产)"
+  - pattern: "(?:二级|三级).{0,10}(?:路径|path|目录).{0,20}(?:系统|system|后台)"
+  - pattern: "site:\S+/.+"
+  - pattern: "(?:/abc/|/bbb/|/api/|/admin/).{0,10}(?:系统|映射|后端)"
+  - pattern: "(?:python|脚本).{0,10}(?:检测|扫描).{0,10}(?:代理|proxy)"
+
+args:
+  urls:
+    type: string
+    description: "目标 URL 列表（逗号、空格或换行分隔）"
+    required: true
+  engine:
+    type: string
+    description: "使用的搜索引擎"
+    default: "google"
+    required: false
+    enum: ["google", "bing"]
+  use_python_detector:
+    type: boolean
+    description: "使用本地 Python 脚本检测反向代理（推荐）"
+    default: true
+    required: false
+  max_workers:
+    type: number
+    description: "Python 脚本并发线程数"
+    default: 10
+    required: false
+
+tools:
+  - name: proxy-detector
+    description: "使用内置 Python 脚本检测反向代理特征"
+    command: "python ${skill_dir}/proxy_detector.py"
+    args:
+      - name: urls
+        type: string
+        required: true
+      - name: max_workers
+        type: number
+        default: 10
+
+steps:
+  - name: check-environment
+    description: 检查运行环境（Python 可用性、搜索引擎 MCP）
+    prompt: |
+      请检查以下环境：
+
+      1. Python 环境
+         - 检查 python 或 python3 命令是否可用
+         - 检查 requests 库是否安装
+
+      2. 搜索引擎 MCP
+         - 检查 google_search 或 bing_search 是否可用
+
+      3. 内置工具
+         - 检查 ${skill_dir}/proxy_detector.py 是否存在
+
+      返回格式：
+      {
+        "python_available": true/false,
+        "python_version": "3.x.x",
+        "requests_installed": true/false,
+        "search_mcp_available": true/false,
+        "local_script_exists": true/false,
+        "recommendation": "建议使用 Python 脚本 / 使用 WebFetch / 使用 MCP 搜索"
+      }
+
+  - name: detect-reverse-proxy
+    description: 检测目标是否使用反向代理
+    prompt: |
+      请检测以下目标是否为反向代理服务器。
+
+      目标列表：{{args.urls}}
+
+      检测方式选择：
+
+      {{#if args.use_python_detector}}
+      **方式一：使用内置 Python 脚本（推荐）**
+      执行命令：
+      ```
+      python ${skill_dir}/proxy_detector.py --urls "{{args.urls}}" --max_workers {{args.max_workers}} --output json
+      ```
+
+      Python 脚本会检测：
+      - Server 头（nginx/apache/cloudflare）
+      - Via 头
+      - X-Forwarded-* 头
+      - CF-Ray 等 CDN 标识
+      - 错误页面特征
+      - 根路径状态码
+      {{/if}}
+
+      **方式二：使用 WebFetch**
+      如果 Python 不可用，使用 WebFetch 访问每个目标的根路径，分析响应头。
+
+      请根据环境检查结果选择合适的检测方式，并返回检测结果。
+
+      返回格式：
+      {
+        "proxy_assets": [
+          {
+            "url": "http://xxx.com",
+            "domain": "xxx.com",
+            "proxy_detected": true,
+            "proxy_type": "Nginx/Apache/Cloudflare",
+            "root_status": 403,
+            "is_path_mapped": true,
+            "evidence": ["Server: nginx", "根路径403"]
+          }
+        ],
+        "summary": {"total": 2, "proxy_count": 1}
+      }
+
+  - name: search-hidden-paths
+    description: 使用 site: 搜索发现隐藏路径
+    prompt: |
+      对已识别的反向代理资产，使用 site: 搜索全面提取 URL 并分析路径。
+
+      反向代理资产：
+      {{detect-reverse-proxy.proxy_assets}}
+
+      使用的搜索引擎：{{args.engine}}
+
+      **核心策略：全面提取 + 路径分析**
+
+      对每个反向代理域名执行：
+
+      1. 执行 site:xxx.com 获取所有收录的 URL
+      2. 提取搜索结果中的所有 URL
+      3. 分析二级路径模式（/xxx/）
+      4. 统计每个路径的出现频率
+      5. 判断路径类型（管理系统/API/业务系统）
+
+      路径类型判断规则：
+      - /admin/, /manage/, /console/ → 管理系统 ⭐⭐⭐
+      - /api/, /v1/, /v2/ → API 接口 ⭐⭐
+      - /app/, /mobile/, /h5/ → 前端应用 ⭐⭐
+      - /test/, /dev/, /staging/ → 测试环境 ⭐⭐⭐
+      - /static/, /assets/ → 静态资源 ⭐
+
+      如果搜索引擎 MCP 不可用，请提供手动搜索指南。
+
+  - name: generate-report
+    description: 生成最终报告
+    prompt: |
+      汇总所有发现结果，生成结构化报告。
+
+      报告内容包括：
+      1. 执行摘要
+      2. 反向代理识别结果
+      3. 路径映射发现（按域名分组）
+      4. 高价值目标（管理系统、测试环境等）
+      5. 验证建议
+      6. 手动搜索命令（备用）
+
+examples:
+  - input: "用 Python 脚本检测反向代理"
+    args:
+      urls: "http://xxx.com"
+      use_python_detector: true
+  - input: "找反向代理后面的二级路径"
+    args:
+      urls: "http://target1.com, http://target2.com"
+      engine: "bing"
+  - input: "site:xxx.com 找隐藏路径"
+    args:
+      urls: "https://example.com"
+      max_workers: 20
+
+notes: |
+  ## 核心功能
+  1. **本地 Python 检测** - 使用内置脚本精确识别反向代理
+  2. **全面提取策略** - site:xxx.com 提取所有 URL
+  3. **路径分析** - 自动发现 /abc/、/bbb/ 等映射路径
+
+  ## 内置工具
+  - proxy_detector.py: 检测反向代理特征
+  - path_analyzer.py: 分析 URL 路径模式
+
+  ## 检测能力
+  - Nginx/Apache/Cloudflare/CDN 识别
+  - 路径映射发现
+  - 系统类型判断
